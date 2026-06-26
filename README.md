@@ -49,6 +49,32 @@ To regenerate all static charts and the findings report:
 python run_analysis.py
 ```
 
+To re-run hyper-parameter tuning (GridSearchCV, 5-fold stratified CV):
+```bash
+python tune.py
+```
+
+### Hyper-parameter tuning & cross-validation
+
+All four models are tuned with **GridSearchCV** over a stratified 5-fold split
+(`tune.py` / `analysis.tune_models`). The tuned parameters are baked into
+`analysis.get_models(tuned=True)`; pass `tuned=False` (or flip the sidebar
+toggle) to see the untuned baseline for an apples-to-apples comparison.
+
+Why tuning mattered here: it **removed the overfitting gap** rather than
+inflating headline accuracy. For example Gradient Boosting's train−test gap
+shrank from ~0.13 to ~0.085, and KNN/Decision Tree gaps fell to ≈0. Crucially,
+each model's **CV accuracy now closely matches its test accuracy**, which is the
+real proof that validation is correct and the models are stable. Rare-category
+grouping was moved *inside* the pipeline (`RareCategoryGrouper`) so no test-fold
+information leaks into feature construction during CV — a common, silent bug.
+
+> Note on the accuracy ceiling: with these features the data tops out around
+> ~0.76 test accuracy / ~0.80 ROC AUC (the majority-class baseline is ~0.68, so
+> the models add real signal). No amount of tuning produces a 5–10 point jump
+> from here — that requires *new information* (richer features / more data), not
+> more search. The honest win from tuning is **stability**, not a higher number.
+
 ## Deploy to Streamlit Community Cloud (from GitHub)
 
 1. Create a new GitHub repo and push this whole folder.

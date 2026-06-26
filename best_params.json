@@ -1,0 +1,24 @@
+{
+  "KNN": {
+    "n_neighbors": 31,
+    "p": 2,
+    "weights": "uniform"
+  },
+  "Decision Tree": {
+    "criterion": "gini",
+    "max_depth": 4,
+    "min_samples_leaf": 50
+  },
+  "Random Forest": {
+    "max_depth": 12,
+    "max_features": "sqrt",
+    "min_samples_leaf": 5,
+    "n_estimators": 300
+  },
+  "Gradient Boosting": {
+    "learning_rate": 0.1,
+    "max_depth": 2,
+    "n_estimators": 250,
+    "subsample": 1.0
+  }
+}

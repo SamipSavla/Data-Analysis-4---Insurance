@@ -19,10 +19,12 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import (
+    train_test_split, GridSearchCV, StratifiedKFold, cross_val_score)
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
@@ -129,19 +131,39 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _reduce_cardinality(df: pd.DataFrame) -> pd.DataFrame:
-    """Collapse high-cardinality categoricals into top-N + 'Other'."""
-    df = df.copy()
-    for col, top_n in HIGH_CARD.items():
-        top = df[col].value_counts().nlargest(top_n).index
-        df[col] = np.where(df[col].isin(top), df[col], "Other")
-    return df
+class RareCategoryGrouper(BaseEstimator, TransformerMixin):
+    """
+    Collapse infrequent categories into 'Other'. CRITICAL: this is a proper
+    sklearn transformer, so when it lives inside a Pipeline the top-N categories
+    are learned ONLY from the training fold during cross-validation — preventing
+    the test fold from leaking into feature construction.
+    """
+    def __init__(self, top_n=12, other="Other"):
+        self.top_n = top_n
+        self.other = other
+
+    def fit(self, X, y=None):
+        X = pd.DataFrame(X)
+        self.columns_ = list(X.columns)
+        self.keep_ = {
+            c: set(X[c].value_counts().nlargest(self.top_n).index)
+            for c in X.columns
+        }
+        return self
+
+    def transform(self, X):
+        X = pd.DataFrame(X).copy()
+        for c in self.columns_:
+            X[c] = np.where(X[c].isin(self.keep_[c]), X[c], self.other)
+        return X
 
 
 def build_model_frame(df: pd.DataFrame):
-    """Return X (engineered features) and y for modelling."""
-    df = _reduce_cardinality(df)
+    """Return X (engineered, RAW categoricals) and y for modelling.
 
+    Cardinality reduction is NOT done here anymore — it happens inside the
+    pipeline so cross-validation stays leak-free.
+    """
     numeric_features = NUMERIC_RAW + ["SA_TO_INCOME", "IS_TEAM",
                                       "INCOME_MISSING", "IS_SENIOR"]
     cat_features = LOW_CARD + list(HIGH_CARD.keys())
@@ -151,11 +173,15 @@ def build_model_frame(df: pd.DataFrame):
     return X, y, numeric_features, cat_features
 
 
-def make_preprocessor(numeric_features, cat_features) -> ColumnTransformer:
+def make_preprocessor(numeric_features, cat_features, top_n=12) -> ColumnTransformer:
+    cat_pipe = Pipeline([
+        ("group", RareCategoryGrouper(top_n=top_n)),
+        ("oh", OneHotEncoder(handle_unknown="ignore")),
+    ])
     return ColumnTransformer(
         transformers=[
             ("num", StandardScaler(), numeric_features),
-            ("cat", OneHotEncoder(handle_unknown="ignore"), cat_features),
+            ("cat", cat_pipe, cat_features),
         ]
     )
 
@@ -163,37 +189,72 @@ def make_preprocessor(numeric_features, cat_features) -> ColumnTransformer:
 # ----------------------------------------------------------------------------
 # 3. Models
 # ----------------------------------------------------------------------------
-def get_models() -> dict:
+def get_models(tuned: bool = True) -> dict:
+    """Return the four classifiers.
+
+    `tuned=True` (default) uses the hyper-parameters selected by GridSearchCV
+    (see tune_models / outputs/best_params.json). `tuned=False` returns the
+    original hand-set baseline so you can reproduce the before/after comparison.
+    """
+    if not tuned:
+        return {
+            "KNN": KNeighborsClassifier(n_neighbors=15),
+            "Decision Tree": DecisionTreeClassifier(
+                max_depth=6, min_samples_leaf=20, class_weight="balanced",
+                random_state=RANDOM_STATE),
+            "Random Forest": RandomForestClassifier(
+                n_estimators=300, max_depth=12, min_samples_leaf=10,
+                class_weight="balanced", random_state=RANDOM_STATE, n_jobs=-1),
+            "Gradient Boosting": GradientBoostingClassifier(
+                n_estimators=250, max_depth=3, learning_rate=0.05,
+                random_state=RANDOM_STATE),
+        }
+    # ---- GridSearchCV-tuned (5-fold stratified) ----
     return {
-        "KNN": KNeighborsClassifier(n_neighbors=15),
+        "KNN": KNeighborsClassifier(
+            n_neighbors=31, weights="uniform", p=2),
         "Decision Tree": DecisionTreeClassifier(
-            max_depth=6, min_samples_leaf=20, class_weight="balanced",
-            random_state=RANDOM_STATE),
+            criterion="gini", max_depth=4, min_samples_leaf=50,
+            class_weight="balanced", random_state=RANDOM_STATE),
         "Random Forest": RandomForestClassifier(
-            n_estimators=300, max_depth=12, min_samples_leaf=10,
-            class_weight="balanced", random_state=RANDOM_STATE, n_jobs=-1),
+            n_estimators=300, max_depth=12, min_samples_leaf=5,
+            max_features="sqrt", class_weight="balanced",
+            random_state=RANDOM_STATE, n_jobs=-1),
         "Gradient Boosting": GradientBoostingClassifier(
-            n_estimators=250, max_depth=3, learning_rate=0.05,
-            random_state=RANDOM_STATE),
+            n_estimators=250, max_depth=2, learning_rate=0.1,
+            subsample=1.0, random_state=RANDOM_STATE),
     }
 
 
-def train_and_evaluate(df: pd.DataFrame, test_size: float = TEST_SIZE):
+def train_and_evaluate(df: pd.DataFrame, test_size: float = TEST_SIZE,
+                       models: dict | None = None, cv: int = 5):
     """
-    Train all four classifiers and return a results dict containing
-    metrics, fitted pipelines, predictions, ROC data and confusion matrices.
+    Train all classifiers and return a results dict containing metrics,
+    fitted pipelines, predictions, ROC data, confusion matrices AND a
+    5-fold stratified cross-validation accuracy (mean ± std) on the TRAIN set.
+
+    Pass `models=` to use a custom (e.g. tuned) set of estimators.
     """
     X, y, num_f, cat_f = build_model_frame(df)
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=test_size, stratify=y, random_state=RANDOM_STATE)
 
-    pre = make_preprocessor(num_f, cat_f)
+    models = models if models is not None else get_models()
+    skf = (StratifiedKFold(n_splits=cv, shuffle=True, random_state=RANDOM_STATE)
+           if cv else None)
     results = {}
 
-    for name, clf in get_models().items():
-        pipe = Pipeline([("pre", pre), ("clf", clf)])
-        pipe.fit(X_train, y_train)
+    for name, clf in models.items():
+        pipe = Pipeline([("pre", make_preprocessor(num_f, cat_f)), ("clf", clf)])
 
+        # leak-free CV on the training data (set cv=0/None to skip)
+        if cv:
+            cv_scores = cross_val_score(pipe, X_train, y_train, cv=skf,
+                                        scoring="accuracy", n_jobs=-1)
+        else:
+            cv_scores = np.array([np.nan])
+
+        pipe.fit(X_train, y_train)
         y_tr_pred = pipe.predict(X_train)
         y_te_pred = pipe.predict(X_test)
         y_te_prob = pipe.predict_proba(X_test)[:, 1]
@@ -206,6 +267,8 @@ def train_and_evaluate(df: pd.DataFrame, test_size: float = TEST_SIZE):
         results[name] = {
             "pipeline": pipe,
             "train_acc": accuracy_score(y_train, y_tr_pred),
+            "cv_acc": float(cv_scores.mean()),
+            "cv_std": float(cv_scores.std()),
             "test_acc": accuracy_score(y_test, y_te_pred),
             "precision": precision_score(y_test, y_te_pred, zero_division=0),
             "recall": recall_score(y_test, y_te_pred, zero_division=0),
@@ -228,12 +291,88 @@ def train_and_evaluate(df: pd.DataFrame, test_size: float = TEST_SIZE):
     return results, meta
 
 
+# ----------------------------------------------------------------------------
+# 3b. Hyper-parameter tuning (GridSearchCV with stratified k-fold)
+# ----------------------------------------------------------------------------
+def get_param_grids() -> dict:
+    """Search spaces. Keys are prefixed `clf__` to target the estimator
+    inside the Pipeline."""
+    return {
+        "KNN": {
+            "clf__n_neighbors": [21, 31, 41],
+            "clf__weights": ["uniform", "distance"],
+            "clf__p": [1, 2],
+        },
+        "Decision Tree": {
+            "clf__max_depth": [3, 4, 5, 6],
+            "clf__min_samples_leaf": [20, 30, 50],
+            "clf__criterion": ["gini", "entropy"],
+        },
+        "Random Forest": {
+            "clf__n_estimators": [300],
+            "clf__max_depth": [6, 8, 12],
+            "clf__min_samples_leaf": [5, 10, 20],
+            "clf__max_features": ["sqrt", "log2"],
+        },
+        "Gradient Boosting": {
+            "clf__n_estimators": [150, 250],
+            "clf__learning_rate": [0.03, 0.05, 0.1],
+            "clf__max_depth": [2, 3],
+            "clf__subsample": [0.8, 1.0],
+        },
+    }
+
+
+def tune_models(df: pd.DataFrame, test_size: float = TEST_SIZE,
+                cv: int = 5, scoring: str = "accuracy", verbose: bool = True):
+    """
+    GridSearchCV every model. Returns (best_estimators, tuning_report_df).
+    `best_estimators` is a dict name -> fitted-best estimator (the bare clf,
+    ready to plug back into train_and_evaluate via models=).
+    """
+    X, y, num_f, cat_f = build_model_frame(df)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=test_size, stratify=y, random_state=RANDOM_STATE)
+
+    skf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=RANDOM_STATE)
+    grids = get_param_grids()
+    base = get_models()
+
+    best_estimators, rows = {}, []
+    for name in base:
+        pipe = Pipeline([("pre", make_preprocessor(num_f, cat_f)),
+                         ("clf", base[name])])
+        gs = GridSearchCV(pipe, grids[name], cv=skf, scoring=scoring,
+                          n_jobs=-1, refit=True)
+        gs.fit(X_train, y_train)
+
+        train_acc = accuracy_score(y_train, gs.predict(X_train))
+        test_acc = accuracy_score(y_test, gs.predict(X_test))
+        best_estimators[name] = gs.best_estimator_.named_steps["clf"]
+
+        clean = {k.replace("clf__", ""): v for k, v in gs.best_params_.items()}
+        rows.append({
+            "Model": name,
+            "Best CV Acc": round(gs.best_score_, 3),
+            "Train Acc": round(train_acc, 3),
+            "Test Acc": round(test_acc, 3),
+            "Gap (Tr-Te)": round(train_acc - test_acc, 3),
+            "Best Params": clean,
+        })
+        if verbose:
+            print(f"[{name}] CV={gs.best_score_:.3f} "
+                  f"train={train_acc:.3f} test={test_acc:.3f} :: {clean}")
+
+    return best_estimators, pd.DataFrame(rows)
+
+
 def metrics_table(results: dict) -> pd.DataFrame:
     rows = []
     for name, r in results.items():
         rows.append({
             "Model": name,
             "Train Acc": round(r["train_acc"], 3),
+            "CV Acc": round(r.get("cv_acc", float("nan")), 3),
             "Test Acc": round(r["test_acc"], 3),
             "Precision": round(r["precision"], 3),
             "Recall": round(r["recall"], 3),

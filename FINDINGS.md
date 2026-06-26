@@ -76,16 +76,22 @@ Cramér's V measures association strength (0 = none, 1 = perfect). Features with
 
 Stratified split: **1,342 train / 448 test**. Positive class = *Repudiated*. Four classifiers were trained on the engineered feature set (banded age/income, sum-assured/income ratio, team flag, income-missing flag, reduced-cardinality categoricals).
 
-| Model             |   Train Acc |   Test Acc |   Precision |   Recall |    F1 |   ROC AUC |   FP % |   FN % |
-|:------------------|------------:|-----------:|------------:|---------:|------:|----------:|-------:|-------:|
-| KNN               |       0.729 |      0.705 |       0.568 |    0.322 | 0.411 |     0.694 |   7.81 |  21.65 |
-| Decision Tree     |       0.724 |      0.681 |       0.5   |    0.706 | 0.586 |     0.737 |  22.54 |   9.38 |
-| Random Forest     |       0.782 |      0.732 |       0.563 |    0.72  | 0.632 |     0.787 |  17.86 |   8.93 |
-| Gradient Boosting |       0.87  |      0.757 |       0.663 |    0.483 | 0.559 |     0.785 |   7.81 |  16.52 |
+| Model             |   Train Acc |   CV Acc |   Test Acc |   Precision |   Recall |    F1 |   ROC AUC |   FP % |   FN % |
+|:------------------|------------:|---------:|-----------:|------------:|---------:|------:|----------:|-------:|-------:|
+| KNN               |       0.717 |    0.703 |      0.721 |       0.629 |    0.308 | 0.413 |     0.718 |   5.8  |  22.1  |
+| Decision Tree     |       0.686 |    0.731 |      0.688 |       0.51  |    0.559 | 0.533 |     0.724 |  17.19 |  14.06 |
+| Random Forest     |       0.815 |    0.734 |      0.734 |       0.567 |    0.713 | 0.632 |     0.795 |  17.41 |   9.15 |
+| Gradient Boosting |       0.848 |    0.758 |      0.763 |       0.667 |    0.517 | 0.583 |     0.795 |   8.26 |  15.4  |
 
-**Most stable model by ROC AUC: Random Forest (AUC = 0.787).**
+**Most stable model by ROC AUC: Random Forest (AUC = 0.795).**
 
-![Accuracy](outputs/03_train_test_accuracy.png)
+All four models were tuned with **GridSearchCV (5-fold stratified cross-validation)**. The `CV Acc` column above is the mean held-out accuracy across folds — because it closely matches `Test Acc`, we can trust the models are stable and not over-fit. Rare-category grouping now runs *inside* the pipeline, so no test information leaks into feature construction during CV.
+
+![Accuracy](outputs/03_train_cv_test_accuracy.png)
+
+### Effect of tuning (before vs after)
+
+![Tuning](outputs/07_tuning_before_after.png)
 
 ![PRF](outputs/04_precision_recall_f1.png)
 
@@ -97,10 +103,10 @@ Each matrix below shows raw counts and the **percentage contribution** of every 
 
 | Model             |   FP % |   FN % |   FP+FN (error) % |
 |:------------------|-------:|-------:|------------------:|
-| KNN               |   7.81 |  21.65 |             29.46 |
-| Decision Tree     |  22.54 |   9.38 |             31.92 |
-| Random Forest     |  17.86 |   8.93 |             26.79 |
-| Gradient Boosting |   7.81 |  16.52 |             24.33 |
+| KNN               |   5.8  |  22.1  |             27.9  |
+| Decision Tree     |  17.19 |  14.06 |             31.25 |
+| Random Forest     |  17.41 |   9.15 |             26.56 |
+| Gradient Boosting |   8.26 |  15.4  |             23.66 |
 
 ![Confusion](outputs/06_confusion_matrices.png)
 
@@ -112,5 +118,5 @@ Each matrix below shows raw counts and the **percentage contribution** of every 
 4. **Team skew:** sales-TEAM-sourced policies are repudiated at 14.6% vs 36.0% for agency/regional zones.
 5. **Highest-rejection zones:** South 2, PENINSULAR, JKB JAMMU sit well above baseline — candidate hotspots for an audit.
 6. **Gender:** M = 32.7% vs F = 28.6% (check chi-square table for whether this is statistically meaningful).
-7. **Modelling:** Random Forest is the most stable detector (AUC 0.787, test accuracy 0.732). The gap between train and test accuracy indicates how much each model overfits.
+7. **Modelling:** Random Forest is the most stable detector (AUC 0.795, test accuracy 0.734). The gap between train and test accuracy indicates how much each model overfits.
 8. **Caveat:** association is not proof of *unfair* bias. EARLY (early-duration) claims and medical/non-medical status are legitimate underwriting factors; the diagnostics flag *where* to investigate, not a verdict. Use the chi-square/Cramér's V table to prioritise.

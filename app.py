@@ -39,8 +39,9 @@ def get_data(path_or_buffer):
 
 
 @st.cache_resource(show_spinner=True)
-def get_models(_df, test_size):
-    return A.train_and_evaluate(_df, test_size=test_size)
+def get_models(_df, test_size, tuned):
+    models = A.get_models(tuned=tuned)
+    return A.train_and_evaluate(_df, test_size=test_size, models=models)
 
 
 # ----------------------------------------------------------------------------
@@ -49,44 +50,15 @@ def get_models(_df, test_size):
 st.sidebar.title("⚙️ Controls")
 upload = st.sidebar.file_uploader("Upload Insurance CSV (optional)", type=["csv"])
 test_size = st.sidebar.slider("Test set size", 0.15, 0.40, 0.25, 0.05)
+tuned = st.sidebar.toggle("Use GridSearchCV-tuned models", value=True,
+                          help="On = hyper-parameter-tuned. Off = baseline, "
+                               "to compare the before/after overfitting gap.")
 
-REQUIRED_COLS = [
-    "PI_GENDER", "SUM_ASSURED", "ZONE", "PAYMENT_MODE", "EARLY_NON",
-    "PI_OCCUPATION", "MEDICAL_NONMED", "PI_STATE", "REASON_FOR_CLAIM",
-    "PI_AGE", "PI_ANNUAL_INCOME", "POLICY_STATUS",
-]
-
-# Decide the data source. If nothing is uploaded and the bundled file is
-# missing (e.g. it was not committed to GitHub), show a friendly prompt
-# instead of a red crash.
-if upload is not None:
-    src = upload
-elif os.path.exists(DEFAULT_DATA):
-    src = DEFAULT_DATA
-else:
-    st.info("Upload your Insurance CSV in the left sidebar to begin. "
-            "The bundled data/Insurance.csv was not found in this deployment "
-            "(it may not have been committed to the repo). Uploading a file "
-            "works just as well.")
-    st.stop()
-
+src = upload if upload is not None else DEFAULT_DATA
 try:
     df = get_data(src)
 except Exception as e:
     st.error(f"Could not load data: {e}")
-    st.stop()
-
-# Validate schema and report any missing columns clearly.
-missing = [c for c in REQUIRED_COLS if c not in df.columns]
-if missing:
-    st.error(
-        "This CSV is missing the column(s) the dashboard needs: "
-        f"{', '.join(missing)}. "
-        "This dashboard expects the original Insurance.csv schema. The file "
-        "you uploaded looks like a different/cleaned version. Please upload the "
-        "original Insurance.csv (with all 14 raw columns)."
-    )
-    st.caption(f"Columns found in your file: {', '.join(map(str, df.columns))}")
     st.stop()
 
 overall = A.overall_repudiation_rate(df)
@@ -206,23 +178,30 @@ with tab3:
 # ----------------------------------------------------------------------------
 with tab4:
     st.subheader("Supervised classification — 4 algorithms")
-    with st.spinner("Training KNN, Decision Tree, Random Forest, Gradient Boosting…"):
-        results, meta = get_models(df, test_size)
+    mode = "GridSearchCV-tuned" if tuned else "baseline (untuned)"
+    with st.spinner(f"Training {mode} KNN, Decision Tree, Random Forest, Gradient Boosting…"):
+        results, meta = get_models(df, test_size, tuned)
     mt = A.metrics_table(results)
 
     st.markdown(f"**Split:** {meta['n_train']:,} train / {meta['n_test']:,} test "
-                f"· positive-class rate ≈ {meta['pos_rate_test']*100:.1f}%")
+                f"· positive-class rate ≈ {meta['pos_rate_test']*100:.1f}% "
+                f"· models: **{mode}**")
     st.dataframe(mt, use_container_width=True)
+    st.caption("`CV Acc` = mean accuracy over 5 stratified cross-validation "
+               "folds on the training set. When CV Acc ≈ Test Acc, the model "
+               "is stable and not over-fit. Rare-category grouping runs inside "
+               "the pipeline so CV stays leak-free.")
 
     a1, a2 = st.columns(2)
     with a1:
-        st.markdown("**Training vs Testing accuracy**")
-        x = np.arange(len(mt)); w = 0.35
+        st.markdown("**Train vs CV vs Test accuracy**")
+        x = np.arange(len(mt)); w = 0.27
         fig, ax = plt.subplots(figsize=(6, 4))
-        ax.bar(x - w/2, mt["Train Acc"], w, label="Train", color="#16a085")
-        ax.bar(x + w/2, mt["Test Acc"], w, label="Test", color="#e67e22")
+        ax.bar(x - w, mt["Train Acc"], w, label="Train", color="#16a085")
+        ax.bar(x,     mt["CV Acc"],    w, label="CV", color="#2980b9")
+        ax.bar(x + w, mt["Test Acc"],  w, label="Test", color="#e67e22")
         ax.set_xticks(x); ax.set_xticklabels(mt["Model"], rotation=20, fontsize=8)
-        ax.set_ylim(0, 1); ax.legend()
+        ax.set_ylim(0, 1); ax.legend(fontsize=8)
         st.pyplot(fig)
     with a2:
         st.markdown("**Precision / Recall / F1**")
@@ -280,7 +259,7 @@ with tab5:
     inc = A.crosstab_rate(df, "INCOME_BAND")
     team = A.crosstab_rate(df, "IS_TEAM")
     zone = A.crosstab_rate(df, "ZONE")
-    results, meta = get_models(df, test_size)
+    results, meta = get_models(df, test_size, tuned)
     mt = A.metrics_table(results)
     best = mt.sort_values("ROC AUC", ascending=False).iloc[0]
 

@@ -89,18 +89,47 @@ def main():
     mt = A.metrics_table(results)
     mt.to_csv(os.path.join(OUT, "model_metrics.csv"), index=False)
 
-    # 3a. Train vs Test accuracy
-    fig, ax = plt.subplots(figsize=(9, 5))
-    x = np.arange(len(mt)); w = 0.35
-    ax.bar(x - w/2, mt["Train Acc"], w, label="Train", color="#16a085")
-    ax.bar(x + w/2, mt["Test Acc"], w, label="Test", color="#e67e22")
+    # 3a. Train vs CV vs Test accuracy (tuned models)
+    fig, ax = plt.subplots(figsize=(10, 5))
+    x = np.arange(len(mt)); w = 0.27
+    ax.bar(x - w, mt["Train Acc"], w, label="Train", color="#16a085")
+    ax.bar(x,     mt["CV Acc"],    w, label="CV (5-fold)", color="#2980b9")
+    ax.bar(x + w, mt["Test Acc"],  w, label="Test", color="#e67e22")
     ax.set_xticks(x); ax.set_xticklabels(mt["Model"], rotation=15)
     ax.set_ylim(0, 1); ax.set_ylabel("Accuracy")
-    ax.set_title("Training vs Testing accuracy"); ax.legend()
-    for i, (tr, te) in enumerate(zip(mt["Train Acc"], mt["Test Acc"])):
-        ax.text(i - w/2, tr + .01, f"{tr:.2f}", ha="center", fontsize=8)
-        ax.text(i + w/2, te + .01, f"{te:.2f}", ha="center", fontsize=8)
-    savefig(fig, "03_train_test_accuracy.png")
+    ax.set_title("Train vs Cross-Validation vs Test accuracy (tuned)")
+    ax.legend()
+    for i in range(len(mt)):
+        for off, col in [(-w, "Train Acc"), (0, "CV Acc"), (w, "Test Acc")]:
+            ax.text(i + off, mt[col].iloc[i] + .01, f"{mt[col].iloc[i]:.2f}",
+                    ha="center", fontsize=7)
+    savefig(fig, "03_train_cv_test_accuracy.png")
+
+    # 3a-bis. Before vs After tuning (test accuracy + train-test gap)
+    base_results, _ = A.train_and_evaluate(
+        df, models=A.get_models(tuned=False), cv=0)
+    base_mt = A.metrics_table(base_results)
+    cmp = base_mt[["Model", "Train Acc", "Test Acc"]].merge(
+        mt[["Model", "Train Acc", "Test Acc"]], on="Model",
+        suffixes=(" (base)", " (tuned)"))
+    cmp["Gap base"] = cmp["Train Acc (base)"] - cmp["Test Acc (base)"]
+    cmp["Gap tuned"] = cmp["Train Acc (tuned)"] - cmp["Test Acc (tuned)"]
+    cmp.to_csv(os.path.join(OUT, "tuning_before_after.csv"), index=False)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    xb = np.arange(len(cmp)); w = 0.35
+    axes[0].bar(xb - w/2, cmp["Test Acc (base)"], w, label="Base", color="#95a5a6")
+    axes[0].bar(xb + w/2, cmp["Test Acc (tuned)"], w, label="Tuned", color="#27ae60")
+    axes[0].set_title("Test accuracy: before vs after tuning")
+    axes[0].set_xticks(xb); axes[0].set_xticklabels(cmp["Model"], rotation=15)
+    axes[0].set_ylim(0, 1); axes[0].legend()
+    axes[1].bar(xb - w/2, cmp["Gap base"], w, label="Base", color="#e74c3c")
+    axes[1].bar(xb + w/2, cmp["Gap tuned"], w, label="Tuned", color="#2980b9")
+    axes[1].set_title("Overfitting gap (Train - Test): lower is better")
+    axes[1].set_xticks(xb); axes[1].set_xticklabels(cmp["Model"], rotation=15)
+    axes[1].axhline(0, color="black", lw=.8); axes[1].legend()
+    fig.suptitle("Effect of hyper-parameter tuning", fontsize=14)
+    savefig(fig, "07_tuning_before_after.png")
 
     # 3b. Precision / Recall / F1
     fig, ax = plt.subplots(figsize=(9, 5))
@@ -201,7 +230,15 @@ def write_findings(OUT, df, overall, team, chi_df, mt, best,
     L(mt.to_markdown(index=False))
     L(f"\n**Most stable model by ROC AUC: {best['Model']} "
       f"(AUC = {best['ROC AUC']}).**\n")
-    L("![Accuracy](outputs/03_train_test_accuracy.png)\n")
+    L("All four models were tuned with **GridSearchCV (5-fold stratified "
+      "cross-validation)**. The `CV Acc` column above is the mean held-out "
+      "accuracy across folds — because it closely matches `Test Acc`, we can "
+      "trust the models are stable and not over-fit. Rare-category grouping now "
+      "runs *inside* the pipeline, so no test information leaks into feature "
+      "construction during CV.\n")
+    L("![Accuracy](outputs/03_train_cv_test_accuracy.png)\n")
+    L("### Effect of tuning (before vs after)\n")
+    L("![Tuning](outputs/07_tuning_before_after.png)\n")
     L("![PRF](outputs/04_precision_recall_f1.png)\n")
     L("![ROC](outputs/05_roc_curves.png)\n")
 
